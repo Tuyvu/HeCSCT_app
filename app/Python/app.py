@@ -29,23 +29,33 @@ class InferenceRequest(BaseModel):
 # Hàm hỗ trợ
 # -----------------------------
 def convert_formula(formula: str) -> str:
+    import re, math
     if '=' in formula:
         lhs, rhs = formula.split('=', 1)
         rhs = rhs.strip()
     else:
         rhs = formula
-    rhs = rhs.replace('²', '**2')
-    rhs = rhs.replace('·', '*')
-    rhs = rhs.replace('√', 'math.sqrt')
+
+    rhs = rhs.replace('²', '**2').replace('·', '*').replace('√', 'math.sqrt')
+
     def replace_trig(m):
         func = m.group(1)
         arg = m.group(2)
         if func in ['acos', 'asin', 'atan']:
+            # các hàm ngược trả về góc → chuyển sang độ
             return f'math.degrees(math.{func}({arg}))'
         else:
+            # sin, cos, tan nhận độ → chuyển sang radians
             return f'math.{func}(math.radians({arg}))'
-    rhs = re.sub(r'(cos|sin|tan|acos|asin|atan)([A-Z])', replace_trig, rhs)
+
+    # Thay tất cả các hàm lượng giác
+    rhs = re.sub(
+        r'\b(cos|sin|tan|acos|asin|atan)\s*\(\s*([A-Za-z0-9_\+\-\*/]+)\s*\)', 
+        replace_trig,
+        rhs
+    ) ### sửa ở đây nè (nếu cần)
     return rhs
+
 
 def parse_event(event_str: str) -> Dict[str, float]:
     """Chuyển chuỗi a=3,b=4,C=60 -> dict {'a':3,'b':4,'C':60}, hoặc a,b,C -> {'a':None, ...}"""
@@ -240,6 +250,12 @@ def forward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, fl
 
                 if all(values.get(p) is not None for p in premises):
                     try:
+                        expr = convert_formula(rule.formula) ### sửa ở đây nè
+ 
+                        # print(f"[DEBUG] Rule {rule.id}: expr = {expr}")   # 👈 Thêm dòng này
+                        # print(f"[DEBUG] Values = {values}")               # 👈 Có thể thêm dòng này để xem input
+
+                        
                         result = eval(expr, {
                             "__builtins__": None,
                             "math": math,
@@ -258,8 +274,8 @@ def forward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, fl
 
                 steps.append(step)
 
+                # Nếu đạt goal → trả về ngay
                 if conclusion == goal:
-                    # TRẢ VỀ NGAY KHI ĐẠT GOAL
                     return {
                         "success": True,
                         "conclusion": f"{goal} = {values.get(goal)}",
@@ -267,7 +283,15 @@ def forward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, fl
                         "used_rules": [f"R{rule_id}" for rule_id in sorted(used_rules)]
                     }
 
-    # SAU KHI HẾT VÒNG LẶP
+    # === CHỈ 1 LẦN RETURN CUỐI CÙNG ===
+    success = goal in derived
+    conclusion_msg = f"{goal} = {values.get(goal, 'Không tìm thấy')}"
+    return {
+        "success": success,
+        "conclusion": conclusion_msg,
+        "trace": steps,
+        "used_rules": [f"R{rule_id}" for rule_id in sorted(used_rules)]
+    }  # SAU KHI HẾT VÒNG LẶP
     success = goal in derived
     conclusion_msg = f"{goal} = {values.get(goal, 'Không tìm thấy')}"
     return {
@@ -299,31 +323,39 @@ def backward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, f
         visited = set()
     if steps is None:
         steps = []
-    used_rules = set() if not steps else {s["rule_id"] for s in steps}  # Track used rule IDs
-    
+    used_rules = set() if not steps else {s["rule_id"] for s in steps}
+
     if goal in known:
         return True, steps, used_rules
     if goal in visited:
         return False, steps, used_rules
     visited.add(goal)
-    
-    # Select rules based on shortest path in RPG
+
+    # === SỬA: CONVERT CÔNG THỨC TRƯỚC KHI DÙNG ===
+    for rule in rules:
+        rule.converted_formula = convert_formula(rule.formula) # đây
+
+
     applicable_rules = get_shortest_path_rules(rules, known, goal, 'rpg')
-    
+
     for rule in applicable_rules:
         if rule.output.strip() == goal:
             premises = [p.strip() for p in rule.input.split(",") if p.strip()]
             all_known = True
             sub_steps = []
             sub_used_rules = set()
+
             for p in premises:
                 if p not in known:
-                    success, new_steps, new_used_rules = backward_chain(rules, known, p, values, visited, sub_steps)
+                    success, new_steps, new_used_rules = backward_chain(
+                        rules, known, p, values, visited, sub_steps
+                    )
                     sub_steps = new_steps
                     sub_used_rules.update(new_used_rules)
                     if not success:
                         all_known = False
                         break
+
             if all_known:
                 step = {
                     "rule_id": rule.id,
@@ -333,16 +365,25 @@ def backward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, f
                     "converted_formula": rule.converted_formula,
                     "result": None
                 }
+
+                # === SỬA: DÙNG converted_formula ĐÃ CHUYỂN ĐỘ → RADIAN ===
                 if all(values.get(p) is not None for p in premises):
                     try:
-                        result = eval(rule.converted_formula, {
+                        expr = rule.converted_formula.strip() #sửa ở đây
+
+
+                        
+                        print(f"[DEBUG] Rule {rule.id}: expr = {expr}")
+                        print(f"[DEBUG] Values = {values}")
+
+                        
+                        result = eval(expr,  { # đây
                             "__builtins__": None,
                             "math": math,
                             "sqrt": math.sqrt,
                             "cos": math.cos,
+                            "sin": math.sin,
                             "radians": math.radians,
-                            "acos": math.acos,
-                            "asin": math.asin,
                             "degrees": math.degrees
                         }, values)
                         values[goal] = result
@@ -351,14 +392,15 @@ def backward_chain(rules: List[Rule], known: set, goal: str, values: Dict[str, f
                         step["result"] = f"Lỗi: {e}"
                 else:
                     step["result"] = "Derived symbolically"
+
                 steps.extend(sub_steps)
                 steps.append(step)
                 used_rules.add(rule.id)
                 used_rules.update(sub_used_rules)
                 known.add(goal)
                 return True, steps, used_rules
-    return False, steps, used_rules
 
+    return False, steps, used_rules
 # -----------------------------
 # ⚡ API Endpoint
 # -----------------------------
